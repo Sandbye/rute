@@ -1,0 +1,24 @@
+title: Test API
+version: 1.0.0
+baseUrl: https://api.example.com
+
+endpoints:
+  - path: /users/:id
+    method: GET
+    description: Get a user by ID
+    params:
+      schema: ./schemas/user.ts#UserParamsSchema
+    response:
+      200:
+        schema: ./schemas/user.ts#UserResponseSchema
+      404:
+        schema: ./schemas/errors.ts#NotFoundSchema
+
+  - path: /users
+    method: POST
+    description: Create a new user
+    body:
+      schema: ./schemas/user.ts#CreateUserSchema
+    response:
+      201:
+        schema: ./schemas/user.ts#UserResponseSchema
