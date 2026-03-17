@@ -33,6 +33,7 @@ brews:
   - repository:
       owner: Sandbye
       name: homebrew-rute
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/Sandbye/rute
     description: Browse and export your API routes and Zod schemas from the terminal
     license: MIT
