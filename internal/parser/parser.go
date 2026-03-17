@@ -38,68 +38,84 @@ type Field struct {
 	Items       *Schema  `json:"items,omitempty"`  // for array fields
 }
 
-// resolveExtractor finds the extractor script. It checks, in order:
-//  1. ExtractorOverride (set in tests)
-//  2. Relative to the running binary's directory
-//  3. Relative to the current working directory
-//  4. Falls back to the embedded copy written to a temp file
+// ExtractorOverride is set in tests to use a specific extractor path.
 var ExtractorOverride = ""
 
-// cachedExtractor stores the temp file path so we only write it once per process.
-var cachedExtractor string
+// Cached temp file paths (written once per process).
+var cachedRuntime string
+var cachedStatic string
 
-func resolveExtractor() (string, error) {
-	if ExtractorOverride != "" {
-		return ExtractorOverride, nil
+// runtimeDisabled is set to true after the first runtime FALLBACK,
+// so we don't keep retrying for every schema ref in a single run.
+var runtimeDisabled bool
+
+func embeddedScript(cached *string, content []byte, prefix string) (string, error) {
+	if *cached != "" {
+		return *cached, nil
 	}
-
-	// Try relative to binary
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "extractor", "index.js")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-
-	// Try relative to CWD
-	if cwd, err := os.Getwd(); err == nil {
-		candidate := filepath.Join(cwd, "extractor", "index.js")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-
-	// Fall back to embedded script
-	if cachedExtractor != "" {
-		return cachedExtractor, nil
-	}
-
-	tmp, err := os.CreateTemp("", "rute-extractor-*.js")
+	tmp, err := os.CreateTemp("", prefix)
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp extractor: %w", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	if _, err := tmp.Write(extractor.Script); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		tmp.Close()
-		return "", fmt.Errorf("failed to write temp extractor: %w", err)
+		return "", fmt.Errorf("failed to write temp file: %w", err)
 	}
 	tmp.Close()
-	cachedExtractor = tmp.Name()
-	return cachedExtractor, nil
+	*cached = tmp.Name()
+	return *cached, nil
 }
 
 // Parse runs the Node.js extractor for the given schema reference and returns
 // the parsed Schema. baseDir is the directory containing rute.yaml.
+//
+// It tries the runtime extractor first (esbuild + z.toJSONSchema), which
+// handles all Zod patterns perfectly. If the runtime extractor signals a
+// fallback (exit code 2 — missing esbuild/zod/node_modules), it falls
+// back to the static regex-based extractor.
 func Parse(baseDir, file, export string) (*Schema, error) {
 	absFile := filepath.Join(baseDir, file)
-	extractorAbs, err := resolveExtractor()
+
+	if ExtractorOverride != "" {
+		return runExtractor(ExtractorOverride, absFile, file, export)
+	}
+
+	// Try runtime extractor first (unless previously disabled).
+	if !runtimeDisabled {
+		runtimePath, err := embeddedScript(&cachedRuntime, extractor.RuntimeScript, "rute-runtime-*.js")
+		if err == nil {
+			schema, err := runExtractor(runtimePath, absFile, file, export)
+			if err == nil {
+				return schema, nil
+			}
+			// Check if the runtime signalled fallback (exit code 2).
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+				runtimeDisabled = true
+				// Fall through to static extractor.
+			} else {
+				// Real error from runtime — don't fall back, report it.
+				return nil, err
+			}
+		}
+	}
+
+	// Fall back to static extractor.
+	staticPath, err := embeddedScript(&cachedStatic, extractor.Script, "rute-static-*.js")
 	if err != nil {
 		return nil, err
 	}
+	return runExtractor(staticPath, absFile, file, export)
+}
 
-	cmd := exec.Command("node", extractorAbs, absFile, export)
+func runExtractor(extractorPath, absFile, file, export string) (*Schema, error) {
+	cmd := exec.Command("node", extractorPath, absFile, export)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Return the raw error so caller can inspect exit code.
+			if exitErr.ExitCode() == 2 {
+				return nil, exitErr
+			}
 			return nil, fmt.Errorf("extractor failed for %s#%s: %s", file, export, string(exitErr.Stderr))
 		}
 		return nil, fmt.Errorf("extractor error for %s#%s: %w", file, export, err)

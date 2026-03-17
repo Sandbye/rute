@@ -31,3 +31,14 @@ go.work.sum
 # .idea/
 # .vscode/
 
+# rute export output
+rute-out/
+
+# rute binary
+rute
+
+# testdata node_modules
+testdata/node_modules/
+testdata/package.json
+testdata/package-lock.json
+

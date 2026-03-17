@@ -3,22 +3,36 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/sandbye/rute/internal/tui"
 )
 
-var cfgFile string
+var (
+	cfgFile string
+	version = "dev"
+)
 
 var rootCmd = &cobra.Command{
-	Use:   "rute",
-	Short: "Browse and export your API routes and Zod schemas from the terminal",
+	Use:     "rute",
+	Short:   "Browse and export your API routes and Zod schemas from the terminal",
+	Version: version,
 	Long: `rute reads your rute.yaml and renders API documentation directly in the terminal.
 
 Run without a subcommand to launch the interactive TUI browser.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: launch TUI (Issue 8)
-		fmt.Println("Interactive TUI coming in milestone 2. Try: rute list")
-		return nil
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		cfgPath := cfgFile
+		if cfgPath == "" {
+			cfgPath = "rute.yaml"
+		}
+		baseDir := filepath.Dir(cfgPath)
+		return tui.Run(cfg, baseDir)
 	},
 }
 

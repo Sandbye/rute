@@ -1,10 +1,12 @@
 title: Test API
 version: 1.0.0
 baseUrl: https://api.example.com
+description: A demo API for testing rute's documentation features.
 
 endpoints:
   - path: /users/:id
     method: GET
+    tags: [users]
     description: Get a user by ID
     params:
       schema: ./schemas/user.ts#UserParamsSchema
@@ -16,9 +18,49 @@ endpoints:
 
   - path: /users
     method: POST
+    tags: [users]
     description: Create a new user
     body:
       schema: ./schemas/user.ts#CreateUserSchema
     response:
       201:
         schema: ./schemas/user.ts#UserResponseSchema
+
+  - path: /users/:id
+    method: DELETE
+    tags: [users]
+    description: Delete a user
+    params:
+      schema: ./schemas/user.ts#UserParamsSchema
+    response:
+      204: {}
+
+  - path: /payouts
+    method: GET
+    tags: [payouts]
+    description: List all payouts
+    query:
+      schema: ./schemas/payout.ts#PayoutListQuerySchema
+    response:
+      200:
+        schema: ./schemas/payout.ts#PayoutSchema
+
+  - path: /payouts
+    method: POST
+    tags: [payouts]
+    description: Create a payout
+    body:
+      schema: ./schemas/payout.ts#CreatePayoutSchema
+    response:
+      201:
+        schema: ./schemas/payout.ts#PayoutSchema
+
+  - path: /payouts/:id
+    method: GET
+    tags: [payouts]
+    description: Get a payout by ID
+    response:
+      200:
+        schema: ./schemas/payout.ts#PayoutSchema
+      404:
+        schema: ./schemas/errors.ts#NotFoundSchema
