@@ -34,8 +34,8 @@ go.work.sum
 # rute export output
 rute-out/
 
-# rute binary
-rute
+# rute binary (root only, not cmd/rute/)
+/rute
 
 # testdata node_modules
 testdata/node_modules/
