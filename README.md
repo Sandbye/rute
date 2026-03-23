@@ -8,6 +8,8 @@ Docs: https://sandbye.github.io/rute
 
 ## Install
 
+For human or agent-driven installs, use [`docs/installation.md`](docs/installation.md).
+
 ### Homebrew
 ```sh
 brew install Sandbye/rute/rute
@@ -79,6 +81,7 @@ rute validate
 
 ## Learn more
 
+- [`docs/installation.md`](docs/installation.md) — Installation instructions for humans and agents
 - [`docs/SPEC.md`](docs/SPEC.md) — Full `rute.yaml` format specification
 - [`rute --help`](https://github.com/Sandbye/rute#readme) — All commands and flags
 
