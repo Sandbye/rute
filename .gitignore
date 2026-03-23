@@ -42,3 +42,6 @@ testdata/node_modules/
 testdata/package.json
 testdata/package-lock.json
 
+# local scratch data
+tmp/
+testdata/.rute/
