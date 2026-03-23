@@ -2,9 +2,10 @@
 
 BINARY := rute
 CMD     := ./cmd/rute
+VERSION ?= $(shell git describe --tags --always --dirty)
 
 build:
-	go build -o $(BINARY) $(CMD)
+	go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY) $(CMD)
 
 test:
 	go test ./...

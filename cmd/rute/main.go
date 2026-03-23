@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +15,47 @@ var (
 	cfgFile string
 	version = "dev"
 )
+
+func init() {
+	version = effectiveVersion(version)
+	rootCmd.Version = version
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "path to rute.yaml (default: ./rute.yaml)")
+	rootCmd.AddCommand(completionCmd)
+}
+
+func effectiveVersion(defaultVersion string) string {
+	if defaultVersion != "" && defaultVersion != "dev" {
+		return defaultVersion
+	}
+
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return defaultVersion
+	}
+
+	var revision string
+	var modified string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			if len(setting.Value) >= 7 {
+				revision = setting.Value[:7]
+			} else {
+				revision = setting.Value
+			}
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+
+	if revision == "" {
+		return defaultVersion
+	}
+	if modified == "true" {
+		return "dev-" + revision + "-dirty"
+	}
+	return "dev-" + revision
+}
 
 var rootCmd = &cobra.Command{
 	Use:     "rute",
@@ -32,13 +74,8 @@ Run without a subcommand to launch the interactive TUI browser.`,
 			cfgPath = "rute.yaml"
 		}
 		baseDir := filepath.Dir(cfgPath)
-		return tui.Run(cfg, baseDir)
+		return tui.Run(cfg, baseDir, version)
 	},
-}
-
-func init() {
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "path to rute.yaml (default: ./rute.yaml)")
-	rootCmd.AddCommand(completionCmd)
 }
 
 var completionCmd = &cobra.Command{

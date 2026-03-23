@@ -4,6 +4,8 @@ Browse and export your API routes and Zod schemas from the terminal.
 
 rute reads a `rute.yaml` file in your repo and renders your API documentation directly in the terminal — no browser, no build step, no drift from the actual schemas.
 
+Docs: https://sandbye.github.io/rute
+
 ## Install
 
 ### Homebrew

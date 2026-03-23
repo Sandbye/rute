@@ -3,12 +3,17 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -22,8 +27,8 @@ import (
 )
 
 // Run launches the interactive TUI browser for the given config.
-func Run(cfg *ruteYaml.Config, baseDir string) error {
-	m := newModel(cfg, baseDir)
+func Run(cfg *ruteYaml.Config, baseDir, binaryVersion string) error {
+	m := newModel(cfg, baseDir, binaryVersion)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -104,10 +109,17 @@ type useModeField struct {
 // ---------------------------------------------------------------------------
 
 type httpResponseMsg struct {
+	epIndex    int
+	method     string
+	url        string
 	statusCode int
 	body       string
 	err        error
 	elapsed    time.Duration
+}
+
+type clipboardMsg struct {
+	err error
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +144,8 @@ type persistedField struct {
 type persistedEntry struct {
 	EpIndex    int              `json:"ep_index"`
 	Fields     []persistedField `json:"fields"`
+	Method     string           `json:"method,omitempty"`
+	URL        string           `json:"url,omitempty"`
 	StatusCode int              `json:"status_code"`
 	Body       string           `json:"body"`
 	ErrMsg     string           `json:"err_msg,omitempty"`
@@ -247,6 +261,8 @@ func loadHistory(baseDir string) []historyEntry {
 			epIndex: p.EpIndex,
 			fields:  fields,
 			response: httpResponseMsg{
+				method:     p.Method,
+				url:        p.URL,
 				statusCode: p.StatusCode,
 				body:       p.Body,
 				err:        respErr,
@@ -276,6 +292,8 @@ func saveHistory(baseDir string, history []historyEntry) {
 		persisted[i] = persistedEntry{
 			EpIndex:    e.epIndex,
 			Fields:     fields,
+			Method:     e.response.method,
+			URL:        e.response.url,
 			StatusCode: e.response.statusCode,
 			Body:       e.response.body,
 			ErrMsg:     errMsg,
@@ -294,6 +312,7 @@ func saveHistory(baseDir string, history []historyEntry) {
 type model struct {
 	cfg     *ruteYaml.Config
 	baseDir string
+	version string
 
 	sidebar []sidebarItem
 	cursor  int // cursor indexes into sidebar (skips groups)
@@ -369,7 +388,7 @@ func makeScratchInputs(nameW, valW int) [2]textinput.Model {
 	return [2]textinput.Model{ni, vi}
 }
 
-func newModel(cfg *ruteYaml.Config, baseDir string) model {
+func newModel(cfg *ruteYaml.Config, baseDir, binaryVersion string) model {
 	items := buildSidebarItems(cfg)
 	cursor := 0
 	for i, item := range items {
@@ -383,6 +402,7 @@ func newModel(cfg *ruteYaml.Config, baseDir string) model {
 	return model{
 		cfg:         cfg,
 		baseDir:     baseDir,
+		version:     binaryVersion,
 		sidebar:     items,
 		cursor:      cursor,
 		details:     make(map[int]string),
@@ -599,16 +619,25 @@ func fieldsToBody(fields []useModeField) string {
 // buildURL builds a URL substituting path params and appending query string.
 func buildURL(baseURL, path string, fields []useModeField) string {
 	for _, f := range fields {
-		if f.section == "params" && f.value != "" {
-			path = strings.ReplaceAll(path, ":"+f.key, f.value)     // :id style
-			path = strings.ReplaceAll(path, "{"+f.key+"}", f.value) // {id} style
+		if f.section == "params" {
+			value := strings.TrimSpace(f.value)
+			if value == "" {
+				continue
+			}
+			path = strings.ReplaceAll(path, ":"+f.key, value)     // :id style
+			path = strings.ReplaceAll(path, "{"+f.key+"}", value) // {id} style
 		}
 	}
 
 	var qparts []string
 	for _, f := range fields {
-		if f.section == "query" && f.value != "" {
-			qparts = append(qparts, f.key+"="+f.value)
+		if f.section == "query" {
+			key := strings.TrimSpace(f.key)
+			value := strings.TrimSpace(f.value)
+			if key == "" || value == "" {
+				continue
+			}
+			qparts = append(qparts, key+"="+value)
 		}
 	}
 
@@ -640,45 +669,154 @@ func buildCurlPreview(ep ruteYaml.Endpoint, baseURL string, fields []useModeFiel
 }
 
 // fireRequest performs the HTTP call and returns a Cmd that delivers the result.
-func fireRequest(ep ruteYaml.Endpoint, baseURL string, fields []useModeField) tea.Cmd {
+func fireRequest(epIndex int, ep ruteYaml.Endpoint, baseURL string, fields []useModeField) tea.Cmd {
 	return func() tea.Msg {
 		url := buildURL(baseURL, ep.Path, fields)
 		body := fieldsToBody(fields)
+		result := executeRequest(ep.Method, url, body, fields)
+		result.epIndex = epIndex
+		result.method = ep.Method
+		result.url = url
+		return result
+	}
+}
 
-		var bodyReader io.Reader
-		if body != "" {
-			bodyReader = bytes.NewBufferString(body)
+func executeRequest(method, rawURL, body string, fields []useModeField) httpResponseMsg {
+	resp := doRequest(method, rawURL, body, fields, "")
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !shouldRetryLoopback(parsed, resp) {
+		return resp
+	}
+
+	for _, altHost := range alternateLoopbackHosts(parsed.Hostname()) {
+		altResp := doRequest(method, rawURL, body, fields, altHost)
+		if altResp.err == nil && altResp.statusCode != 404 {
+			return altResp
+		}
+	}
+
+	return resp
+}
+
+func doRequest(method, rawURL, body string, fields []useModeField, dialHostOverride string) httpResponseMsg {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = bytes.NewBufferString(body)
+	}
+
+	req, err := http.NewRequest(method, rawURL, bodyReader)
+	if err != nil {
+		return httpResponseMsg{err: err}
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for _, f := range fields {
+		if f.section == "headers" {
+			key := strings.TrimSpace(f.key)
+			value := strings.TrimSpace(f.value)
+			if key == "" || value == "" {
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+	}
+	start := time.Now()
+	resp, err := requestClientForURL(rawURL, dialHostOverride).Do(req)
+	elapsed := time.Since(start)
+	if err != nil {
+		return httpResponseMsg{err: err, elapsed: elapsed}
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	bodyText := string(raw)
+
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, raw, "", "  ") == nil {
+		bodyText = pretty.String()
+	}
+
+	return httpResponseMsg{
+		statusCode: resp.StatusCode,
+		body:       bodyText,
+		elapsed:    elapsed,
+	}
+}
+
+func requestClientForURL(rawURL, dialHostOverride string) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = func(req *http.Request) (*url.URL, error) {
+		host := req.URL.Hostname()
+		if isLoopbackHost(host) {
+			return nil, nil
+		}
+		return http.ProxyFromEnvironment(req)
+	}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dialHostOverride != "" {
+			_, port, err := net.SplitHostPort(addr)
+			if err == nil {
+				addr = net.JoinHostPort(dialHostOverride, port)
+			}
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	return &http.Client{Transport: transport}
+}
+
+func shouldRetryLoopback(parsed *url.URL, resp httpResponseMsg) bool {
+	if parsed == nil || !strings.EqualFold(parsed.Hostname(), "localhost") {
+		return false
+	}
+	if resp.err != nil || resp.statusCode != 404 {
+		return false
+	}
+	body := strings.TrimSpace(resp.body)
+	return body == "Not Found" || strings.EqualFold(body, "GET not found")
+}
+
+func alternateLoopbackHosts(host string) []string {
+	if !strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	return []string{"127.0.0.1", "::1"}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func copyToClipboardCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		candidates := [][]string{
+			{"pbcopy"},
+			{"wl-copy"},
+			{"xclip", "-selection", "clipboard"},
+			{"clip.exe"},
 		}
 
-		req, err := http.NewRequest(ep.Method, url, bodyReader)
-		if err != nil {
-			return httpResponseMsg{err: err}
-		}
-		if body != "" {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		for _, f := range fields {
-			if f.section == "headers" && f.value != "" {
-				req.Header.Set(f.key, f.value)
+		for _, candidate := range candidates {
+			if runtime.GOOS == "darwin" && candidate[0] != "pbcopy" {
+				continue
+			}
+			if runtime.GOOS == "windows" && candidate[0] != "clip.exe" {
+				continue
+			}
+
+			cmd := exec.Command(candidate[0], candidate[1:]...)
+			cmd.Stdin = strings.NewReader(text)
+			if err := cmd.Run(); err == nil {
+				return clipboardMsg{}
 			}
 		}
 
-		start := time.Now()
-		resp, err := http.DefaultClient.Do(req)
-		elapsed := time.Since(start)
-		if err != nil {
-			return httpResponseMsg{err: err, elapsed: elapsed}
-		}
-		defer resp.Body.Close()
-
-		raw, _ := io.ReadAll(resp.Body)
-
-		// Pretty-print JSON if possible
-		var pretty bytes.Buffer
-		if json.Indent(&pretty, raw, "", "  ") == nil {
-			return httpResponseMsg{statusCode: resp.StatusCode, body: pretty.String(), elapsed: elapsed}
-		}
-		return httpResponseMsg{statusCode: resp.StatusCode, body: string(raw), elapsed: elapsed}
+		return clipboardMsg{err: fmt.Errorf("clipboard tool not available")}
 	}
 }
 
@@ -779,13 +917,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.useRespScroll = 0
 		// Save to history regardless of success/failure
 		m.history = append(m.history, historyEntry{
-			epIndex:  m.selectedEndpointIndex(),
+			epIndex:  msg.epIndex,
 			fields:   append([]useModeField{}, m.useFields...),
 			response: msg,
 			firedAt:  time.Now(),
 		})
 		m.historyCursor = 0
 		saveHistory(m.baseDir, m.history)
+	case clipboardMsg:
 	default:
 		// Forward tick messages to whichever textinput is focused so the cursor blinks
 		var cmd tea.Cmd
@@ -1095,10 +1234,15 @@ func (m model) updateUseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.useFiring {
 			m.useFiring = true
 			m.useResponse = nil
-			ep := m.cfg.Endpoints[m.selectedEndpointIndex()]
+			epIdx := m.selectedEndpointIndex()
+			ep := m.cfg.Endpoints[epIdx]
 			resolved := resolveFields(m.useFields, m.vars)
-			return m, fireRequest(ep, m.cfg.BaseURL, resolved)
+			return m, fireRequest(epIdx, ep, m.cfg.BaseURL, resolved)
 		}
+	case "y":
+		ep := m.cfg.Endpoints[m.selectedEndpointIndex()]
+		resolved := resolveFields(m.useFields, m.vars)
+		return m, copyToClipboardCmd(buildCurlPreview(ep, m.cfg.BaseURL, resolved))
 	case "h":
 		if len(m.history) > 0 {
 			m.historyOpen = true
@@ -1502,6 +1646,7 @@ var allCommands = []cmdEntry{
 	{"ctrl+u", "Clear field", "use"},
 	{"ctrl+w", "Delete last word", "use"},
 	{"ctrl+r / f5", "Fire request", "use"},
+	{"y", "Copy curl command", "use"},
 	{"a", "Add header row (when on headers)", "use"},
 	{"ctrl+x", "Delete header row", "use"},
 	{"h", "Open request history", "use"},
@@ -1859,21 +2004,29 @@ var (
 	// Use mode specific styles
 	useLabelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8")).
-			Width(18)
+			Width(14)
 
-	// Row styles: no borders, just subtle background tints
+	usePlaceholderStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Italic(true)
+
+	useKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("7"))
+
+	// Use mode rows
 	useFieldStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7")).
+			Background(lipgloss.Color("236")).
 			Padding(0, 1)
 
 	useFieldActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("15")).
-				Background(lipgloss.Color("237")).
+				Background(lipgloss.Color("239")).
 				Padding(0, 1)
 
 	useFieldEditingStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("15")).
-				Background(lipgloss.Color("234")).
+				Background(lipgloss.Color("12")).
 				Padding(0, 1)
 
 	useSectionStyle = lipgloss.NewStyle().
@@ -1962,6 +2115,8 @@ func (m model) View() string {
 	var help string
 	if m.searching {
 		help = helpLook.Render("  ↑/↓ select  •  enter jump  •  esc close")
+	} else if m.useMode {
+		help = helpLook.Render("  ctrl+r send  •  y copy curl  •  esc leave  •  ctrl+p commands")
 	} else {
 		help = helpLook.Render("  ctrl+p  commands")
 	}
@@ -2007,15 +2162,24 @@ func (m model) renderUseMode(width, height int) string {
 	lines = append(lines, "")
 
 	// ── Fields ───────────────────────────────────────────────────────────────
-	// Layout: label column (fixed 18) + value column (remaining)
-	labelW := 18
-	rowW := width - labelW - 4
+	// Layout: compact label column + value column.
+	labelW := 14
+	rowW := width - labelW - 3
 	if rowW < 10 {
 		rowW = 10
 	}
-	// For headers: key and value split the row
-	hKeyW := rowW/2 - 2
-	hValW := rowW - hKeyW - 3
+	// Headers get a compact key and a wider value area so they stay on one row.
+	hKeyW := rowW / 3
+	if hKeyW < 12 {
+		hKeyW = 12
+	}
+	if hKeyW > 18 {
+		hKeyW = 18
+	}
+	hValW := rowW - hKeyW - 1
+	if hValW < 10 {
+		hValW = 10
+	}
 
 	currentSection := ""
 	activeSuggestions := []string(nil)
@@ -2040,11 +2204,13 @@ func (m model) renderUseMode(width, height int) string {
 		if f.section == "headers" {
 			keyDisplay := f.key
 			if keyDisplay == "" {
-				keyDisplay = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("header-name")
+				keyDisplay = usePlaceholderStyle.Render("header-name")
+			} else {
+				keyDisplay = useKeyStyle.Render(keyDisplay)
 			}
 			valDisplay := f.value
 			if valDisplay == "" {
-				valDisplay = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("value")
+				valDisplay = usePlaceholderStyle.Render("value")
 			}
 
 			var keyPart, valPart string
@@ -2065,7 +2231,7 @@ func (m model) renderUseMode(width, height int) string {
 				valPart = useFieldStyle.Width(hValW).Render(valDisplay)
 			}
 
-			sep := helpLook.Render("  :  ")
+			sep := " "
 			// Fixed-width label placeholder so column never shifts
 			lbl := useLabelStyle.Render("")
 			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Center, lbl, keyPart, sep, valPart))
@@ -2104,12 +2270,12 @@ func (m model) renderUseMode(width, height int) string {
 				fieldPart = useFieldEditingStyle.Width(rowW).Render(f.input.View())
 			case isActive:
 				if displayVal == "" {
-					displayVal = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("—")
+					displayVal = usePlaceholderStyle.Render("enter value")
 				}
 				fieldPart = useFieldActiveStyle.Width(rowW).Render(displayVal)
 			default:
 				if displayVal == "" {
-					displayVal = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("—")
+					displayVal = usePlaceholderStyle.Render("enter value")
 				}
 				fieldPart = useFieldStyle.Width(rowW).Render(displayVal)
 			}
@@ -2153,7 +2319,7 @@ func (m model) renderUseMode(width, height int) string {
 
 	// ── Send hint ──────────────────────────────────────────────────────────
 	lines = append(lines, "")
-	lines = append(lines, fireHintStyle.Render(" ctrl+r ")+" "+helpLook.Render("send"))
+	lines = append(lines, fireHintStyle.Render(" ctrl+r ")+" "+helpLook.Render("send")+"  "+fireHintStyle.Render(" y ")+" "+helpLook.Render("copy curl"))
 	lines = append(lines, "")
 
 	// ── Divider ────────────────────────────────────────────────────────────
@@ -2232,6 +2398,10 @@ func (m model) renderSidebar(width, height int) string {
 	var sb strings.Builder
 
 	sb.WriteString(titleLook.Render(m.cfg.Title))
+	if m.version != "" {
+		sb.WriteString("  ")
+		sb.WriteString(helpLook.Render("rute " + m.version))
+	}
 	sb.WriteString("\n")
 
 	listHeight := height - 3
