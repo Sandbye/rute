@@ -36,6 +36,7 @@ type Field struct {
 	Values      []string `json:"values,omitempty"` // for enum fields
 	Fields      []Field  `json:"fields,omitempty"` // for nested objects
 	Items       *Schema  `json:"items,omitempty"`  // for array fields
+	Variants    []Schema `json:"variants,omitempty"`
 }
 
 // ExtractorOverride is set in tests to use a specific extractor path.

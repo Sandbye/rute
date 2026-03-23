@@ -2,6 +2,7 @@
 package renderer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -40,7 +41,9 @@ func MethodStyle(method string) string {
 
 // RenderSchema renders a schema as a terminal tree, returning the string.
 func RenderSchema(schema *parser.Schema, indent string, last bool) string {
-	// Top-level call renders the object fields directly.
+	if schema == nil {
+		return ""
+	}
 	if schema.Type == "object" {
 		var sb strings.Builder
 		for i, f := range schema.Fields {
@@ -49,7 +52,7 @@ func RenderSchema(schema *parser.Schema, indent string, last bool) string {
 		}
 		return sb.String()
 	}
-	return fmt.Sprintf("%s  %s\n", indent, renderTypeSummary(schema.Type, schema.Values, nil))
+	return fmt.Sprintf("%s  %s\n", indent, RenderSchemaTypeSummary(schema))
 }
 
 func renderField(f parser.Field, indent string, last bool) string {
@@ -60,37 +63,40 @@ func renderField(f parser.Field, indent string, last bool) string {
 		childIndent = indent + "    "
 	}
 
-	req := styleDim.Render("optional")
-	if f.Required {
-		req = ""
+	typePart := RenderFieldTypeSummary(f)
+	meta := make([]string, 0, len(f.Validations)+3)
+	if !f.Required {
+		meta = append(meta, styleDim.Render("optional"))
+	}
+	if f.Nullable {
+		meta = append(meta, styleDim.Render("nullable"))
+	}
+	if HasDefaultValue(f.Default) {
+		meta = append(meta, styleTag.Render("default:"+FormatDefaultValue(f.Default)))
+	}
+	if len(f.Validations) > 0 {
+		meta = append(meta, styleTag.Render(strings.Join(f.Validations, " ")))
 	}
 
-	typePart := renderTypeSummary(f.Type, f.Values, f.Items)
-	validations := ""
-	if len(f.Validations) > 0 {
-		validations = "  " + styleTag.Render(strings.Join(f.Validations, " "))
+	metaPart := ""
+	if len(meta) > 0 {
+		metaPart = "  " + strings.Join(meta, "  ")
 	}
+
 	desc := ""
 	if f.Description != "" {
 		desc = "  " + styleDim.Render(f.Description)
 	}
 
-	reqPart := ""
-	if req != "" {
-		reqPart = "  " + req
-	}
-
-	line := fmt.Sprintf("%s%s%s  %s%s%s%s\n",
+	line := fmt.Sprintf("%s%s%s  %s%s%s\n",
 		indent, connector,
 		styleBold.Render(f.Name),
 		typePart,
-		reqPart,
-		validations,
+		metaPart,
 		desc,
 	)
 
-	// Recurse into nested objects.
-	if f.Type == "object" && len(f.Fields) > 0 {
+	if len(f.Fields) > 0 {
 		var sb strings.Builder
 		sb.WriteString(line)
 		for i, child := range f.Fields {
@@ -103,7 +109,41 @@ func renderField(f parser.Field, indent string, last bool) string {
 	return line
 }
 
-func renderTypeSummary(typ string, values []string, items *parser.Schema) string {
+// RenderFieldTypeSummary returns a compact, human-readable type summary.
+func RenderFieldTypeSummary(f parser.Field) string {
+	return renderTypeSummary(f.Type, f.Values, f.Items, f.Variants)
+}
+
+// RenderSchemaTypeSummary returns a compact, human-readable type summary.
+func RenderSchemaTypeSummary(schema *parser.Schema) string {
+	if schema == nil {
+		return ""
+	}
+	return renderTypeSummary(schema.Type, schema.Values, schema.Items, schema.Variants)
+}
+
+// HasDefaultValue reports whether a field has a default value.
+func HasDefaultValue(v any) bool {
+	return v != nil
+}
+
+// FormatDefaultValue renders a default value while preserving falsey values.
+func FormatDefaultValue(v any) string {
+	switch value := v.(type) {
+	case string:
+		return fmt.Sprintf("%q", value)
+	case nil:
+		return ""
+	default:
+		data, err := json.Marshal(value)
+		if err == nil {
+			return string(data)
+		}
+		return fmt.Sprint(value)
+	}
+}
+
+func renderTypeSummary(typ string, values []string, items *parser.Schema, variants []parser.Schema) string {
 	switch typ {
 	case "enum":
 		quoted := make([]string, len(values))
@@ -113,10 +153,52 @@ func renderTypeSummary(typ string, values []string, items *parser.Schema) string
 		return "enum  " + strings.Join(quoted, " | ")
 	case "array":
 		if items != nil {
-			return fmt.Sprintf("array<%s>", items.Type)
+			return fmt.Sprintf("array<%s>", inlineSchemaSummary(items))
 		}
 		return "array"
+	case "record":
+		if items != nil {
+			return fmt.Sprintf("record<%s>", inlineSchemaSummary(items))
+		}
+		return "record"
+	case "union":
+		if len(variants) > 0 {
+			parts := make([]string, len(variants))
+			for i, variant := range variants {
+				parts[i] = inlineSchemaSummary(&variant)
+			}
+			return "union<" + strings.Join(parts, " | ") + ">"
+		}
+		return "union"
+	case "intersection":
+		if len(variants) > 0 {
+			parts := make([]string, len(variants))
+			for i, variant := range variants {
+				parts[i] = inlineSchemaSummary(&variant)
+			}
+			return "intersection<" + strings.Join(parts, " & ") + ">"
+		}
+		return "intersection"
+	case "literal":
+		if len(values) > 0 {
+			return fmt.Sprintf("literal  %q", values[0])
+		}
+		return "literal"
 	default:
 		return typ
+	}
+}
+
+func inlineSchemaSummary(schema *parser.Schema) string {
+	if schema == nil {
+		return "unknown"
+	}
+	switch schema.Type {
+	case "object":
+		return "object"
+	case "enum", "array", "record", "union", "intersection", "literal":
+		return renderTypeSummary(schema.Type, schema.Values, schema.Items, schema.Variants)
+	default:
+		return schema.Type
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sandbye/rute/internal/parser"
+	"github.com/sandbye/rute/internal/renderer"
 	ruteYaml "github.com/sandbye/rute/internal/yaml"
 )
 
@@ -219,4 +220,7 @@ var templateFuncs = template.FuncMap{
 			return "rgba(148,163,184,0.1)"
 		}
 	},
+	"fieldType":    renderer.RenderFieldTypeSummary,
+	"hasDefault":   renderer.HasDefaultValue,
+	"defaultValue": renderer.FormatDefaultValue,
 }

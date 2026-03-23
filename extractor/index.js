@@ -547,7 +547,7 @@ function parseFieldExpr(name, expr) {
   // .default(...)
   const defaultMatch = /\.default\s*\(([^)]*)\)/.exec(base);
   if (defaultMatch) {
-    defaultValue = defaultMatch[1].trim().replace(/['"]/g, '');
+    defaultValue = parseDefaultValue(defaultMatch[1].trim());
     base = base.replace(defaultMatch[0], '');
   }
 
@@ -618,6 +618,7 @@ function parseFieldExpr(name, expr) {
   if (schema.values) field.values = schema.values;
   if (schema.fields) field.fields = schema.fields;
   if (schema.items) field.items = schema.items;
+  if (schema.variants) field.variants = schema.variants;
 
   return field;
 }
@@ -659,6 +660,20 @@ function parseUnionVariants(inner) {
   }
 
   return variants;
+}
+
+function parseDefaultValue(raw) {
+  const value = raw.trim();
+  if (/^['"`].*['"`]$/.test(value)) {
+    return value.slice(1, -1);
+  }
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (value === 'null') return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) {
+    return Number(value);
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------

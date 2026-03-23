@@ -563,11 +563,11 @@ body {
 <div class="field-row">
   <span class="tree-guide">{{.Prefix}}{{if .IsLast}}└── {{else}}├── {{end}}</span>
   <span class="f-name">{{.Field.Name}}</span>
-  <span class="f-type">{{.Field.Type}}</span>
+  <span class="f-type">{{fieldType .Field}}</span>
   {{if not .Field.Required}}<span class="f-opt">optional</span>{{end}}
+  {{if .Field.Nullable}}<span class="f-opt">nullable</span>{{end}}
   {{range .Field.Validations}}<span class="f-badge">{{.}}</span>{{end}}
-  {{if .Field.Default}}<span class="f-badge">default: {{.Field.Default}}</span>{{end}}
-  {{if .Field.Values}}<span class="f-enum-vals">{{range $i, $v := .Field.Values}}{{if $i}} | {{end}}"{{$v}}"{{end}}</span>{{end}}
+  {{if hasDefault .Field.Default}}<span class="f-badge">default: {{defaultValue .Field.Default}}</span>{{end}}
   {{if .Field.Description}}<span class="f-desc">{{.Field.Description}}</span>{{end}}
 </div>
 {{if .Field.Fields}}{{range $i, $child := .Field.Fields}}{{template "fieldLine" (makeFieldCtx $child $i (len $.Field.Fields) (childPrefix $.Prefix $.IsLast))}}{{end}}{{end}}

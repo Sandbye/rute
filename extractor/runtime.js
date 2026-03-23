@@ -126,6 +126,13 @@ async function run() {
 
 function jsonSchemaToRute(js, name) {
   if (js.type === 'object') {
+    if (js.additionalProperties && !js.properties) {
+      return {
+        name,
+        type: 'record',
+        items: jsonSchemaToRute(js.additionalProperties, ''),
+      };
+    }
     const fields = [];
     const required = new Set(js.required || []);
     for (const [key, prop] of Object.entries(js.properties || {})) {
@@ -143,6 +150,10 @@ function jsonSchemaToRute(js, name) {
     return { name, type: 'enum', values: js.enum };
   }
 
+  if (js.const !== undefined) {
+    return { name, type: 'literal', values: [String(js.const)] };
+  }
+
   if (js.anyOf) {
     // Check for nullable pattern: anyOf[realType, {type: "null"}]
     const nonNull = js.anyOf.filter(v => v.type !== 'null');
@@ -156,7 +167,15 @@ function jsonSchemaToRute(js, name) {
     return { name, type: 'union', variants };
   }
 
+  if (js.allOf) {
+    const variants = js.allOf.map(v => jsonSchemaToRute(v, ''));
+    return { name, type: 'intersection', variants };
+  }
+
   if (js.type) {
+    if (js.type === 'integer') {
+      return { name, type: 'number' };
+    }
     return { name, type: js.type };
   }
 
@@ -170,6 +189,7 @@ function jsonSchemaFieldToRute(fieldName, prop, isRequired) {
   let values = undefined;
   let fields = undefined;
   let items = undefined;
+  let variants = undefined;
   let defaultValue = undefined;
   let description = prop.description;
 
@@ -187,6 +207,8 @@ function jsonSchemaFieldToRute(fieldName, prop, isRequired) {
       result.nullable = true;
       return result;
     }
+    type = 'union';
+    variants = nonNull.map(v => jsonSchemaToRute(v, ''));
   }
 
   // Handle default
@@ -200,18 +222,33 @@ function jsonSchemaFieldToRute(fieldName, prop, isRequired) {
     values = prop.enum;
   }
 
+  if (prop.const !== undefined) {
+    type = 'literal';
+    values = [String(prop.const)];
+  }
+
   // Handle object
-  if (type === 'object' && prop.properties) {
-    const required = new Set(prop.required || []);
-    fields = [];
-    for (const [key, subProp] of Object.entries(prop.properties)) {
-      fields.push(jsonSchemaFieldToRute(key, subProp, required.has(key)));
+  if (type === 'object') {
+    if (prop.additionalProperties && !prop.properties) {
+      type = 'record';
+      items = jsonSchemaToRute(prop.additionalProperties, '');
+    } else if (prop.properties) {
+      const required = new Set(prop.required || []);
+      fields = [];
+      for (const [key, subProp] of Object.entries(prop.properties)) {
+        fields.push(jsonSchemaFieldToRute(key, subProp, required.has(key)));
+      }
     }
   }
 
   // Handle array
   if (type === 'array' && prop.items) {
     items = jsonSchemaToRute(prop.items, '');
+  }
+
+  if (type === 'integer') {
+    type = 'number';
+    validations.push('int');
   }
 
   // Collect validations from JSON Schema keywords
@@ -223,12 +260,24 @@ function jsonSchemaFieldToRute(fieldName, prop, isRequired) {
   // Filter out JS safe integer bounds — Zod v4 emits these for every .int()
   const SAFE_MIN = -9007199254740991; // Number.MIN_SAFE_INTEGER
   const SAFE_MAX = 9007199254740991;  // Number.MAX_SAFE_INTEGER
-  if (prop.minimum !== undefined && prop.minimum !== SAFE_MIN) validations.push(`min:${prop.minimum}`);
-  if (prop.maximum !== undefined && prop.maximum !== SAFE_MAX) validations.push(`max:${prop.maximum}`);
-  if (prop.exclusiveMinimum !== undefined && prop.exclusiveMinimum !== SAFE_MIN) validations.push(`exclusiveMin:${prop.exclusiveMinimum}`);
-  if (prop.exclusiveMaximum !== undefined && prop.exclusiveMaximum !== SAFE_MAX) validations.push(`exclusiveMax:${prop.exclusiveMaximum}`);
+  if (prop.minimum !== undefined && prop.minimum !== SAFE_MIN) {
+    if (prop.minimum === 0) validations.push('nonnegative')
+    else validations.push(`min:${prop.minimum}`);
+  }
+  if (prop.maximum !== undefined && prop.maximum !== SAFE_MAX) {
+    if (prop.maximum === 0) validations.push('nonpositive');
+    else validations.push(`max:${prop.maximum}`);
+  }
+  if (prop.exclusiveMinimum !== undefined && prop.exclusiveMinimum !== SAFE_MIN) {
+    if (prop.exclusiveMinimum === 0) validations.push('positive');
+    else validations.push(`exclusiveMin:${prop.exclusiveMinimum}`);
+  }
+  if (prop.exclusiveMaximum !== undefined && prop.exclusiveMaximum !== SAFE_MAX) {
+    if (prop.exclusiveMaximum === 0) validations.push('negative');
+    else validations.push(`exclusiveMax:${prop.exclusiveMaximum}`);
+  }
   if (prop.multipleOf !== undefined) {
-    if (prop.multipleOf === 1) validations.push('int');
+    if (prop.multipleOf === 1 && !validations.includes('int')) validations.push('int');
     else validations.push(`multipleOf:${prop.multipleOf}`);
   }
   if (prop.pattern && !prop.format) {
@@ -243,12 +292,13 @@ function jsonSchemaFieldToRute(fieldName, prop, isRequired) {
   };
 
   if (nullable) field.nullable = true;
-  if (defaultValue !== undefined) field.default = String(defaultValue);
+  if (defaultValue !== undefined) field.default = defaultValue;
   if (description) field.description = description;
   if (validations.length > 0) field.validations = validations;
   if (values) field.values = values;
   if (fields) field.fields = fields;
   if (items) field.items = items;
+  if (variants) field.variants = variants;
 
   return field;
 }
