@@ -234,37 +234,41 @@ Output: `./rute-out/index.html` by default. Configurable via `--out` flag.
 
 ## Milestones
 
-### Milestone 1 — Core (start here)
-Get something useful working end to end.
+### Milestone 1 — Core ✅ shipped
 
-- [ ] Issue 1: Define the YAML spec format → `docs/SPEC.md`
-- [ ] Issue 2: Bootstrap Go project structure
-- [ ] Issue 3: YAML file reader
-- [ ] Issue 4: Zod schema parser ⚠️ hardest part, prove this first
-- [ ] Issue 5: Schema tree renderer
-- [ ] Issue 6: `rute list` command
-- [ ] Issue 7: `rute show <path>` command
+- [x] Issue 1: Define the YAML spec format → `docs/SPEC.md`
+- [x] Issue 2: Bootstrap Go project structure
+- [x] Issue 3: YAML file reader
+- [x] Issue 4: Zod schema parser
+- [x] Issue 5: Schema tree renderer
+- [x] Issue 6: `rute list` command
+- [x] Issue 7: `rute show <path>` command
 
-### Milestone 2 — Polish
-Make it genuinely pleasant to use.
+### Milestone 2 — Polish ✅ shipped
 
-- [ ] Issue 8: Interactive TUI browser (Bubble Tea)
-- [ ] Issue 9: `rute validate` command
-- [ ] Issue 10: Support common Zod patterns
-- [ ] Issue 11: `rute init` command
+- [x] Issue 8: Interactive TUI browser (Bubble Tea)
+- [x] Issue 9: `rute validate` command
+- [x] Issue 10: Support common Zod patterns
+- [x] Issue 11: `rute init` command
 
-### Milestone 3 — Export
-Make it useful for public-facing docs.
+### Milestone 3 — Export ✅ shipped
 
-- [ ] Issue 12: `rute export` static HTML generation
-- [ ] Issue 13: HTML doc site design
-- [ ] Issue 14: `rute export --watch` live reload
+- [x] Issue 12: `rute export` static HTML generation
+- [x] Issue 13: HTML doc site design
+- [x] Issue 14: `rute export --watch` live reload
 
-### Milestone 4 — Publish
-Distribution and hosting.
+### Milestone 4 — Publish ✅ shipped
 
-- [ ] Issue 15: GoReleaser + Homebrew + install script
-- [ ] Issue 16: Public hosting + `rute publish` command
+- [x] Issue 15: GoReleaser + Homebrew + install script
+- [x] Issue 16: Public hosting + `rute publish` command
+
+### Post-1.0 backlog (open issues)
+
+- [ ] #19: Derive routes from the framework, not a hand-written `rute.yaml`
+- [ ] #20: Machine-readable output (`--json`) so agents can explore the API
+- [ ] #21: Test the Zod extractor + parser (highest-risk gap)
+- [ ] #22: Support `z.tuple`, `z.enum(NativeEnum)`, `z.coerce.*`, `.readonly`
+- [ ] #23: Document "use mode" (live request client) as a first-class feature
 
 ---
 
@@ -284,10 +288,12 @@ Distribution and hosting.
 
 ## Known gotchas and things to watch
 
-- The Zod parser is the core technical risk. If static parsing of `.ts` files is too brittle (due to complex imports, re-exports, computed schemas), we may need to fall back to a runtime approach where the extractor actually imports and introspects the live schema object. Prove this early.
-- Zod schemas that are composed from other imported schemas (e.g. `const FooSchema = BaseSchema.extend({...})`) are harder to parse statically. Handle simple cases first.
-- `z.lazy()` for recursive schemas is an edge case — defer until after milestone 1.
+- **Two extractor paths exist, and they can silently disagree.** `extractor/index.js` static-parses with zero dependencies; `extractor/runtime.js` bundles with esbuild, evaluates, and introspects via `z.toJSONSchema()`. Runtime falls back to static when esbuild/zod are missing or Zod < 4 (`runtime.js:57,62`), so the same `.ts` file can yield different output depending on the user's `node_modules`, with no signal. Runtime is the truth source (it sees the real schema object); a divergence is a static-extractor bug. This is what #21 exists to catch.
+- **rute targets Zod 4** (`z.toJSONSchema()` is v4-only). Watch the v4 API changes: `z.nativeEnum()` deprecated in favour of `z.enum()` accepting native enum objects, and coercion moved to the `z.coerce.*` namespace.
+- Composed schemas (`BaseSchema.extend({...})`, `.merge()`, `.pick()`, `.omit()`, `.partial()`) are handled at `extractor/index.js:118-155` with import following at :39-63. Cross-file `.merge()` and chained transforms have code paths but no tests yet.
+- `z.lazy()` for recursive schemas is deliberately deferred.
 - Go's `os/exec` to shell out to Node.js means Node must be installed on the user's machine. This is a reasonable assumption for a TypeScript developer but should be documented clearly.
+- Test coverage is thin: only `internal/renderer` has tests. `internal/parser`, `internal/yaml`, `internal/export`, `internal/tui` and both extractors have none.
 
 ---
 
@@ -295,23 +301,23 @@ Distribution and hosting.
 
 > Update this section at the start and end of every session.
 
-**Status:** Milestone 1 complete. Core pipeline working end-to-end.
+**Status:** Milestones 1 through 4 all shipped. Released v0.1.1 → v0.1.5, Homebrew tap live. Every planned command works: `list`, `show`, `validate`, `init`, `export` (+ `--watch`), `publish`, and the TUI.
 
-**Completed this session:**
-- GitHub labels, milestones (M1–M4), and issues (#1–#16) created
-- `docs/SPEC.md` written (Issue 1)
-- Go project bootstrapped: `go.mod`, Cobra CLI, internal package stubs, Makefile, CI (Issue 2)
-- `internal/yaml`: YAML reader + typed structs + validation (Issue 3)
-- `extractor/index.js`: Node.js static Zod parser — zero dependencies (Issue 4)
-- `internal/parser`: Go↔Node bridge (Issue 4)
-- `internal/renderer`: terminal tree with Lip Gloss colour coding (Issue 5)
-- `rute list` command (Issue 6)
-- `rute show <path>` command (Issue 7)
-- `testdata/schemas/` fixture files
+Beyond the original plan, the TUI gained a **live request client** ("use mode"): send real HTTP requests with editable headers and body, copy as curl. Undocumented and unadvertised, see #23.
 
-**Next session:**
-- Issue 8: Interactive TUI browser (Bubble Tea) — Milestone 2 start
-- Or Issue 9: `rute validate` first (simpler, good warm-up)
+**Completed this session (audit only, no code changes):**
+- Audited all 11 open issues against the actual code, verified by build, `go test`, and running the binary
+- Closed #10–#18 as shipped, each with evidence in the closing comment
+- Opened #21 (extractor tests), #22 (missing Zod 4 types), #23 (document use mode)
+- Amended #21 to specify a differential harness between the two extractor paths, and #22 to target the real Zod 4 API surface rather than deprecated `z.nativeEnum`
+- Corrected this file: milestones, gotchas, current focus
+
+**Backlog, in recommended order:**
+1. **#21** extractor + parser tests. Highest risk: rute's value is faithfulness to the real schemas, and a parse bug is silently wrong rather than loud. Build the differential harness first.
+2. **#22** missing Zod 4 types. Nearly free once #21's harness exists, one fixture per type.
+3. **#19** derive routes from the framework. The differentiator: kills `rute.yaml` as a second source of truth.
+4. **#23** document use mode. Cheap, fixes positioning.
+5. **#20** `--json` output. Cheap, stacks on the existing structs.
 
 ---
 
@@ -321,3 +327,5 @@ Distribution and hosting.
 
 - **Session 1:** Full project planning. Defined concept, stack, milestones, issues, YAML format, parser strategy. Repo not yet created.
 - **Session 2:** GitHub setup (labels, milestones, 16 issues). Implemented Milestone 1 end-to-end: SPEC.md, Go project structure, YAML reader, Zod extractor (Node.js), parser bridge, terminal renderer, `rute list`, `rute show`. All working.
+- **Session 3:** Implemented Milestones 2–4 in one pass (commit `1841bbc`): TUI, validate, init, export + HTML template, publish, GoReleaser + Homebrew + install.sh. Added runtime extractor path (`extractor/runtime.js`). Released v0.1.1 → v0.1.5. Docs site + installation guide. Issues left open.
+- **Session 4:** Audit + housekeeping. Confirmed M1–M4 shipped, closed #10–#18 with evidence, opened and refined #21–#23, updated this file (milestones, gotchas, current focus). Found two things the plan missed: the two extractor paths can silently disagree, and rute targets Zod 4 so `z.nativeEnum` is the wrong target while `z.enum(NativeEnum)` and `z.coerce.*` are the real gaps.
